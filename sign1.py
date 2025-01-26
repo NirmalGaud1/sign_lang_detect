@@ -70,23 +70,42 @@ def predict_tflite(image):
     return pred_class, confidence
 
 def process_frame(frame):
-    """Process frame and classify hand gestures"""
-    # Crop the center region of the frame for prediction
-    h, w, _ = frame.shape
-    center_crop = frame[h // 4:3 * h // 4, w // 4:3 * w // 4]
-
-    # Predict the cropped image
-    pred_class, confidence = predict_tflite(center_crop)
-
-    # Draw a bounding box and label on the frame
-    cv2.rectangle(frame, (w // 4, h // 4), (3 * w // 4, 3 * h // 4), (0, 255, 0), 2)
-    cv2.putText(frame, f"{pred_class} ({confidence:.2f})", (w // 4, h // 4 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-    # Update the detection buffer
-    if confidence > st.session_state.confidence_threshold:
-        st.session_state.buffer.append(pred_class)
-        st.session_state.buffer = st.session_state.buffer[-st.session_state.buffer_size:]
+    """Process frame and classify hand gestures using basic skin-color detection."""
+    # Convert the frame to HSV for skin color detection
+    hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    
+    # Define HSV range for skin color (tweak these values as needed)
+    lower_skin = np.array([0, 20, 70], dtype=np.uint8)
+    upper_skin = np.array([20, 255, 255], dtype=np.uint8)
+    
+    # Create a mask for skin color
+    mask = cv2.inRange(hsv_frame, lower_skin, upper_skin)
+    
+    # Find contours of the mask
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Proceed only if at least one contour is found
+    if contours:
+        # Find the largest contour (assuming it's the hand)
+        largest_contour = max(contours, key=cv2.contourArea)
+        x, y, w, h = cv2.boundingRect(largest_contour)
+        
+        # Crop the hand region
+        hand_image = frame[y:y + h, x:x + w]
+        
+        # Only process if the region is large enough
+        if hand_image.size > 0:
+            pred_class, confidence = predict_tflite(hand_image)
+            
+            # Draw bounding box and label on the frame
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.putText(frame, f"{pred_class} ({confidence:.2f})", (x, y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+            # Update detection buffer
+            if confidence > st.session_state.confidence_threshold:
+                st.session_state.buffer.append(pred_class)
+                st.session_state.buffer = st.session_state.buffer[-st.session_state.buffer_size:]
 
     return frame
 
