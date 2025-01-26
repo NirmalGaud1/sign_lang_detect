@@ -3,7 +3,6 @@
 
 # In[ ]:
 
-
 import streamlit as st
 import cv2
 import numpy as np
@@ -11,7 +10,7 @@ import tensorflow as tf
 import google.generativeai as genai
 import time
 
-# Configuration
+# Configuration - MUST MATCH TRAINING
 MODEL_PATH = "sign_language_model.tflite"
 GEMINI_API_KEY = "AIzaSyA-9-lTQTWdNM43YdOXMQwGKDy0SrMwo6c"
 CATEGORIES = ['1','2','3','4','5','6','7','8','9','A','B','C','D','E','F','G',
@@ -21,11 +20,15 @@ CATEGORIES = ['1','2','3','4','5','6','7','8','9','A','B','C','D','E','F','G',
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 
-# Load TFLite model
+# Load TFLite model with verification
 interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
+
+# Verify model input specs
+assert input_details[0]['shape'][1:] == (64, 64, 3), "Model input shape mismatch!"
+assert input_details[0]['dtype'] == np.float32, "Model input dtype mismatch!"
 
 # Streamlit page configuration
 st.set_page_config(page_title="Sign Language Translator", layout="wide")
@@ -37,10 +40,10 @@ if 'buffer' not in st.session_state:
         'gemini_text': "Make gestures to begin...",
         'last_update': 0,
         'running': False,
-        'confidence_threshold': 0.5,
+        'confidence_threshold': 0.7,
         'buffer_size': 5,
-        'last_predictions': [],
-        'detection_zone_size': 400  # Default detection zone size
+        'detection_zone_size': 400,
+        'last_predictions': []
     })
 
 def get_gemini_response(text):
@@ -56,37 +59,41 @@ def get_gemini_response(text):
         return "Explanation unavailable"
 
 def process_frame(frame):
-    """Process frame with fixed detection zone"""
+    """Processing pipeline matching training specs"""
     h, w = frame.shape[:2]
     current_predictions = []
     
-    # Create detection zone rectangle (centered)
+    # Detection zone setup
     box_size = st.session_state.detection_zone_size
     x_min = (w - box_size) // 2
     y_min = (h - box_size) // 2
     x_max = x_min + box_size
     y_max = y_min + box_size
     
-    # Draw detection zone
+    # Visual feedback
     cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (255, 0, 0), 2)
-    cv2.putText(frame, "Place hand here", (x_min + 10, y_min - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
     
-    # Extract and process hand region
+    # Extract and preprocess EXACTLY like training
     hand_image = frame[y_min:y_max, x_min:x_max]
-    
     if hand_image.size == 0:
         return frame
 
-    # Preprocessing
+    # 1. COLOR CONVERSION (Critical fix!)
+    hand_image = cv2.cvtColor(hand_image, cv2.COLOR_BGR2RGB)
+    
+    # 2. Resize and normalize
     processed_image = cv2.resize(hand_image, (64, 64))
     processed_image = processed_image.astype(np.float32) / 255.0
     processed_image = np.expand_dims(processed_image, axis=0)
 
-    # Model inference
+    # Model prediction
     interpreter.set_tensor(input_details[0]['index'], processed_image)
     interpreter.invoke()
     pred = interpreter.get_tensor(output_details[0]['index'])[0]
+    
+    # Filter invalid classes from training data
+    valid_indices = [i for i, cls in enumerate(CATEGORIES) if cls not in ['images', 'labels']]
+    pred = pred[valid_indices]
     
     pred_class = CATEGORIES[np.argmax(pred)]
     confidence = np.max(pred)
@@ -101,7 +108,7 @@ def process_frame(frame):
                       (x_min, y_min - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
             current_predictions.append(pred_class)
 
-    # Update detection buffer
+    # Update buffer
     if current_predictions:
         st.session_state.buffer.extend(current_predictions)
         st.session_state.buffer = st.session_state.buffer[-st.session_state.buffer_size:]
@@ -114,7 +121,7 @@ st.title("Sign Language Translator 🤟")
 # Sidebar controls
 with st.sidebar:
     st.header("Controls")
-    st.session_state.confidence_threshold = st.slider("Confidence Threshold", 0.0, 1.0, 0.5)
+    st.session_state.confidence_threshold = st.slider("Confidence Threshold", 0.0, 1.0, 0.7)
     st.session_state.buffer_size = st.slider("Buffer Size", 1, 20, 5)
     st.session_state.detection_zone_size = st.slider("Detection Zone Size", 200, 600, 400)
     
@@ -140,7 +147,6 @@ with col1:
         if run_button.button("Start Detection"):
             st.session_state.running = True
 
-    # Dynamic camera refresh
     if st.session_state.running:
         camera = st.camera_input("Webcam Feed", key=f"cam_{time.time()}")
     else:
@@ -159,7 +165,6 @@ if st.session_state.running and camera is not None:
     processed_frame = process_frame(frame)
     col1.image(processed_frame, channels="BGR")
     
-    # Update Gemini explanation every 3 seconds
     if time.time() - st.session_state.last_update > 3 and st.session_state.buffer:
         st.session_state.gemini_text = get_gemini_response(' '.join(st.session_state.buffer))
         st.session_state.last_update = time.time()
